@@ -30,7 +30,6 @@
  */
 #define QUIC_PACKET_LENGTH 1200
 
-
 /*
  * QUIC Long Header
  * 
@@ -39,7 +38,7 @@
  * from the server, this is not necessary
  */
 typedef struct {
-	uint8_t header_flags;       // four least-significant bits should protected by Header Protection
+	uint8_t header_flags;
 #define HEADER_FLAG_FORM_LONG_HEADER 0x1 << 7 // 1 = LONG HEADER
 #define HEADER_FLAG_FIXED_BIT 0x1 << 6  
 #define HEADER_FLAG_TYPE_INITIAL 0x00 << 4 // 0x00 = INITIAL
@@ -52,6 +51,21 @@ typedef struct {
   uint8_t src_conn_id_length; // should be 0 without source connection id
   uint8_t token_length;       // should be 0 without a token
   uint16_t length;            // in bytes
-  uint32_t packet_number;     // protected by Header Protection
+  uint32_t packet_number;
 } __attribute__ ((__packed__)) quic_long_hdr;
+
+/*
+ * QUIC Version Negotiation Packet
+ * 
+ * 
+ */
+typedef struct {
+	uint8_t header_flags;          
+  uint32_t version;           // must be set to 0x00000000
+#define QUIC_VERSION_VERSION_NEGOTIATION 0x00000000
+	uint8_t dst_conn_id_length; // should be 0 in response to our packet
+  uint8_t src_conn_id_length; // must be 0x08 (our dst_conn_id_length from before)
+  uint64_t src_conn_id;       // must be our dst_conn_id from before
+  // next fields should be supported versions
+} __attribute__ ((__packed__)) quic_version_negotiation_hdr;
 

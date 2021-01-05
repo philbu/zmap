@@ -10,6 +10,8 @@
 
 /* module to perform IETF QUIC (draft-32) enumeration */
 
+#include <bits/stdint-uintn.h>
+#include <netinet/udp.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -177,7 +179,7 @@ void quic_initial_print_packet(FILE *fp, void* packet)
 void quic_initial_process_packet(const u_char *packet, UNUSED uint32_t len, fieldset_t *fs, UNUSED uint32_t *validation,
 			__attribute__((unused)) struct timespec ts)
 {
-	/*struct ip *ip_hdr = (struct ip *) &packet[sizeof(struct ether_header)];
+	struct ip *ip_hdr = (struct ip *) &packet[sizeof(struct ether_header)];
 	if (ip_hdr->ip_p == IPPROTO_UDP) {
 		struct udphdr *udp = (struct udphdr *) ((char *) ip_hdr + ip_hdr->ip_hl * 4);
 
@@ -186,7 +188,40 @@ void quic_initial_process_packet(const u_char *packet, UNUSED uint32_t len, fiel
 		uint16_t data_len = ntohs(udp->uh_ulen);
 		if (data_len > sizeof(struct udphdr)) {
 			uint8_t* payload = (uint8_t*)&udp[1];
-			if (data_len > (QUIC_HDR_LEN_HASH - 13 - sizeof(struct udphdr))) {
+      if (data_len > (sizeof(quic_version_negotiation_hdr) + sizeof(struct udphdr))) {
+        quic_version_negotiation_hdr* quic_version_negotiation = (quic_version_negotiation_hdr*) payload;
+        if (quic_version_negotiation->version == QUIC_VERSION_VERSION_NEGOTIATION
+          && quic_version_negotiation->dst_conn_id_length == 0x00
+          && quic_version_negotiation->src_conn_id_length == 0x08
+          && quic_version_negotiation->src_conn_id == connection_id
+        ) {
+					fs_add_string(fs, "classification", (char*) "quic", 0);
+					fs_add_uint64(fs, "success", 1);
+          int supported_version_length = (data_len - (sizeof(quic_version_negotiation_hdr) + sizeof(struct udphdr)))/4;
+          if (supported_version_length > 0) {
+            uint8_t* supported_version = (uint8_t*)&quic_version_negotiation[1];
+            // (4 * 2) representation of 4 bytes as hex in string + 1 space
+            int output_string_len = supported_version_length * ((4 * 2) + 1);
+            char *versions = malloc(output_string_len * sizeof(char));
+            for (int i = 0; i < supported_version_length; i++) {
+              int string_index = 9 * i;
+              int supported_version_index = 4 * i;
+              snprintf(
+                (versions+string_index), 10, "%02x%02x%02x%02x ", 
+                *(supported_version+supported_version_index),
+                *(supported_version+supported_version_index+1),
+                *(supported_version+supported_version_index+2),
+                *(supported_version+supported_version_index+3));
+            }
+            fs_add_string(fs, "versions", versions, 1);
+          }
+        } else if (quic_version_negotiation->version == QUIC_VERSION_FORCE_NEGOTIATION) {
+          // if version number not zero'd, the response is probably from a udp echo server
+          fs_add_string(fs, "classification", (char*) "udp", 0);
+          fs_add_uint64(fs, "success", 0);
+        }
+      }
+			/*if (data_len > (sizeof(vn)- 13 - sizeof(struct udphdr))) {
                 quic_common_hdr* quic_header = ((quic_common_hdr*)payload);
 				if(quic_header->dst_connection_id == connection_id) {
 					fs_add_string(fs, "classification", (char*) "quic", 0);
@@ -231,12 +266,12 @@ void quic_initial_process_packet(const u_char *packet, UNUSED uint32_t len, fiel
                         fs_modify_string(fs, "info", (char*) "RST", 0);
                     }
 				}
-			}
+			}*/
 		} else {
 			fs_add_string(fs, "classification", (char*) "udp", 0);
 			fs_add_uint64(fs, "success", 0);
 		}
-	}*/
+	}
 }
 
 int quic_initial_validate_packet(const struct ip *ip_hdr, uint32_t len,
