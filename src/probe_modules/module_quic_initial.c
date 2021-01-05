@@ -20,10 +20,10 @@
 #include <assert.h>
 #include <stdint.h>
 
+#include "../../lib/blocklist.h"
 #include "../../lib/includes.h"
 #include "../../lib/xalloc.h"
 #include "../../lib/lockfd.h"
-#include "../../lib/pbm.h"
 #include "logger.h"
 #include "probe_modules.h"
 #include "packet.h"
@@ -52,16 +52,7 @@ probe_module_t module_quic_initial;
 static char filter_rule[30];
 uint64_t connection_id;
 
-uint8_t** checker_bitmap;
-
 void quic_initial_set_num_ports(int x) { num_ports = x; }
-
-void printBuffer(uint8_t* buf, int len) {
-  for (int i=0; i<len; i++){
-    printf("%02x", *(buf+i));
-  }
-  printf("\n");
-}
 
 int quic_initial_global_initialize(struct state_conf *conf) {
 	num_ports = conf->source_port_last - conf->source_port_first + 1;
@@ -72,11 +63,10 @@ int quic_initial_global_initialize(struct state_conf *conf) {
 	memcpy(filter_rule, "udp src port \0", 14);
 
 	module_quic_initial.pcap_filter = strncat(filter_rule, port, 16);
-	// TODO change length of pcap
+	// set length of pcap
   module_quic_initial.pcap_snaplen = sizeof(struct ether_header) + sizeof(struct ip) + sizeof(struct udphdr) + QUIC_PACKET_LENGTH;
 
 	connection_id = make_quic_conn_id('S', 'C', 'A', 'N', 'N', 'I', 'N', 'G');
-	checker_bitmap = pbm_init();
 	return EXIT_SUCCESS;
 }
 
@@ -201,13 +191,13 @@ void quic_initial_process_packet(const u_char *packet, UNUSED uint32_t len, fiel
           if (supported_version_length > 0) {
             uint8_t* supported_version = (uint8_t*)&quic_version_negotiation[1];
             // (4 * 2) representation of 4 bytes as hex in string + 1 space
-            int output_string_len = supported_version_length * ((4 * 2) + 1);
+            int output_string_len = supported_version_length * ((4 * 2) + 1) + 1;
             char *versions = malloc(output_string_len * sizeof(char));
             for (int i = 0; i < supported_version_length; i++) {
               int string_index = 9 * i;
               int supported_version_index = 4 * i;
               snprintf(
-                (versions+string_index), 10, "%02x%02x%02x%02x ", 
+                (versions+string_index), 11, "%02x%02x%02x%02x ", 
                 *(supported_version+supported_version_index),
                 *(supported_version+supported_version_index+1),
                 *(supported_version+supported_version_index+2),
@@ -221,52 +211,6 @@ void quic_initial_process_packet(const u_char *packet, UNUSED uint32_t len, fiel
           fs_add_uint64(fs, "success", 0);
         }
       }
-			/*if (data_len > (sizeof(vn)- 13 - sizeof(struct udphdr))) {
-                quic_common_hdr* quic_header = ((quic_common_hdr*)payload);
-				if(quic_header->dst_connection_id == connection_id) {
-					fs_add_string(fs, "classification", (char*) "quic", 0);
-					fs_add_uint64(fs, "success", 1);
-				}
-				
-                
-				// probably we got back a version packet
-				if (data_len < (QUIC_HDR_LEN_HASH + CLIENTHELLO_MIN_SIZE - sizeof(struct udphdr))) {
-					quic_version_neg* vers = (quic_version_neg*)payload;
-					if ((vers->public_flags & PUBLIC_FLAG_HAS_VERS) > 0) {
-						// contains version flag
-						int num_versions = (data_len - sizeof(struct udphdr) - 8 - 1) / 4;
-                        if (num_versions > 0) {
-
-                            // create a list of the versions
-                            // 4 bytes each + , + [SPACE] + \0
-                            char* versions = malloc(num_versions * sizeof(uint32_t) + (num_versions-1)*2 + 1);
-                            int next_ver = 0;
-                            
-                            if (*((uint32_t*)&vers->versions[0]) == MakeQuicTag('Q', '0', '0', '1')) {
-                                // someone replied with our own version... probalby UDP echo
-                                fs_modify_string(fs, "classification", (char*) "udp", 0);
-                                fs_modify_uint64(fs, "success", 0);
-                                free(versions);
-                                return;
-                            }
-                            for (int i = 0; i < num_versions; i++) {
-                                memcpy(&versions[next_ver], &vers->versions[i], sizeof(uint32_t));
-                                next_ver += 4;
-                                if(i != num_versions-1) {
-                                    versions[next_ver++] = ',';
-                                    versions[next_ver++] = ' ';
-                                }
-                            }
-                            versions[next_ver] = '\0';
-                            fs_add_string(fs, "versions", versions, 1);
-                            //fs_add_binary(fs, "versions", num_versions * sizeof(uint32_t), vers->versions, 0);
-                            
-                        }
-                    }else if ((vers->public_flags & PUBLIC_FLAG_HAS_RST) > 0) {
-                        fs_modify_string(fs, "info", (char*) "RST", 0);
-                    }
-				}
-			}*/
 		} else {
 			fs_add_string(fs, "classification", (char*) "udp", 0);
 			fs_add_uint64(fs, "success", 0);
@@ -277,30 +221,29 @@ void quic_initial_process_packet(const u_char *packet, UNUSED uint32_t len, fiel
 int quic_initial_validate_packet(const struct ip *ip_hdr, uint32_t len,
 		__attribute__((unused))uint32_t *src_ip, UNUSED uint32_t *validation)
 {
-	if (ip_hdr->ip_p == IPPROTO_UDP) {
-		if ((4*ip_hdr->ip_hl + sizeof(struct udphdr)) > len) {
-			// buffer not large enough to contain expected udp header
-			return 0;
+  // We only want to process UDP datagrams
+	if (ip_hdr->ip_p != IPPROTO_UDP) {
+    return PACKET_INVALID;
+  }
+  if ((4*ip_hdr->ip_hl + sizeof(struct udphdr)) > len) {
+    // buffer not large enough to contain expected udp header
+    return PACKET_INVALID;
+  }
+  struct udphdr *udp = (struct udphdr *)((char *)ip_hdr + 4 * ip_hdr->ip_hl);
+  uint16_t sport = ntohs(udp->uh_dport);
+  if (!check_dst_port(sport, num_ports, validation)) {
+    return PACKET_INVALID;
+  }
+		if (!blocklist_is_allowed(*src_ip)) {
+			return PACKET_INVALID;
 		}
-		
-		int already_checked = pbm_check(checker_bitmap, ntohl(ip_hdr->ip_src.s_addr));
-		if (already_checked) {
-			return 0;
-		}
-		
-		pbm_set(checker_bitmap, ntohl(ip_hdr->ip_src.s_addr));
-		
-		return 1;
-	}
-	
-	return 0;
+  return PACKET_VALID;
 }
 
 static fielddef_t fields[] = {
 	{.name = "classification", .type="string", .desc = "packet classification"},
 	{.name = "success", .type="int", .desc = "is response considered success"},
-	{.name = "versions", .type="string", .desc = "versions if reported"},
-  {.name = "info", .type="string", .desc = "info"}
+	{.name = "versions", .type="string", .desc = "versions if reported"}
 };
 
 probe_module_t module_quic_initial = {
